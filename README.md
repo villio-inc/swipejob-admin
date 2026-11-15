@@ -60,6 +60,17 @@ SwipeJob（Supabase: `swipe-jobs-production`）の候補者を管理する画面
 
 対象は `ADMIN_SCOPE_START`（既定 2026-10-01、JST）以降に登録したユーザーです。
 
+### プロジェクトの切り替え（電験・設備管理／ドライバー）
+
+ヘッダーのプルダウンで、どの事業の候補者を見るかを切り替える。候補者・求人・架電記録などはプロジェクトごとに別の Supabase に入っていて、画面と機能は共通（`lib/projects.ts` に一覧）。
+
+- 接続情報が環境変数に入っているプロジェクトだけがプルダウンに出る。1つだけならプルダウンは出ない
+- 選んだプロジェクトは Cookie に覚え、URL にも `?p=driver` のように付く。URL を他のメンバーに送ると、相手側でも同じプロジェクトで開く
+- メンバー（`crm_staff`）と招待（`crm_invites`）は全プロジェクト共通で、電験側の DB を正とする。他のプロジェクトの DB には、切り替え時と書き込み時に同じ行を写す（架電記録などが担当者を外部キーで持つため）
+- 候補者に送る共有リンク（`/j/...`）は、全プロジェクトからトークンを探して表示する
+
+プロジェクトを増やすときは、`lib/projects.ts` に1行足し、その Supabase に同じテーブル（`crm_*` を含む）を作り、環境変数を2つ足す。
+
 ### 初回セットアップ
 
 1. Supabase の SQL Editor で [`supabase/crm.sql`](supabase/crm.sql) を実行する（`crm_` で始まるテーブルを追加。既存テーブルは変更しない）
@@ -72,6 +83,8 @@ SwipeJob（Supabase: `swipe-jobs-production`）の候補者を管理する画面
 | --- | --- |
 | `SUPABASE_URL` | `https://<project-ref>.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase の Project Settings → API Keys →「Secret keys」の `sb_secret_...` |
+| `DRIVER_SUPABASE_URL`（任意） | ドライバー版の Supabase の URL。設定するとプルダウンに「ドライバー」が出る |
+| `DRIVER_SUPABASE_SERVICE_ROLE_KEY`（任意） | ドライバー版の Supabase の Secret key |
 | `ADMIN_PASSWORD` | 最初の管理者アカウントを作るときの合言葉（作成後は使わない） |
 | `ADMIN_SCOPE_START`（任意） | この日（JST）以降に登録したユーザーだけを表示。未設定なら `2026-10-01` |
 | `SESSION_SECRET`（任意） | ログイン Cookie の署名用。未設定なら Secret key から作る |

@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { getCandidateJobByToken } from "@/lib/candidateJobs";
+import { findSharedJob } from "@/lib/candidateJobs";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
-import { enc, writeRows } from "@/lib/swipeAdmin";
+import { enc, runWithProject, writeRows } from "@/lib/swipeAdmin";
 
 export const dynamic = "force-dynamic";
 
@@ -24,32 +24,35 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     const visitId = String(body.visitId ?? "");
     if (!UUID.test(visitId)) return new NextResponse(null, { status: 400 });
 
-    const job = await getCandidateJobByToken(token);
-    if (!job) return new NextResponse(null, { status: 404 });
+    const shared = await findSharedJob(token);
+    if (!shared) return new NextResponse(null, { status: 404 });
+    const job = shared.job;
 
-    const now = new Date().toISOString();
-    if (body.event === "start") {
-      await writeRows(
-        "POST",
-        "crm_job_views",
-        "",
-        {
-          id: visitId,
-          candidate_job_id: job.id,
-          viewed_at: now,
+    await runWithProject(shared.project, async () => {
+      const now = new Date().toISOString();
+      if (body.event === "start") {
+        await writeRows(
+          "POST",
+          "crm_job_views",
+          "",
+          {
+            id: visitId,
+            candidate_job_id: job.id,
+            viewed_at: now,
+            last_seen_at: now,
+            user_agent: (req.headers.get("user-agent") ?? "").slice(0, 300),
+          },
+          { ignoreDuplicates: true },
+        );
+      } else {
+        await writeRows("PATCH", "crm_job_views", `id=eq.${enc(visitId)}&candidate_job_id=eq.${enc(job.id)}`, {
           last_seen_at: now,
-          user_agent: (req.headers.get("user-agent") ?? "").slice(0, 300),
-        },
-        { ignoreDuplicates: true },
-      );
-    } else {
-      await writeRows("PATCH", "crm_job_views", `id=eq.${enc(visitId)}&candidate_job_id=eq.${enc(job.id)}`, {
-        last_seen_at: now,
-        duration_sec: clamp(body.duration, 24 * 3600),
-        max_scroll: clamp(body.scroll, 100),
-        ...(body.pdf ? { pdf_opened: true } : {}),
-      });
-    }
+          duration_sec: clamp(body.duration, 24 * 3600),
+          max_scroll: clamp(body.scroll, 100),
+          ...(body.pdf ? { pdf_opened: true } : {}),
+        });
+      }
+    });
     return new NextResponse(null, { status: 204 });
   } catch {
     // 記録に失敗しても候補者の閲覧には影響させない

@@ -1,13 +1,14 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getCandidateJobByToken, lookupJobs } from "@/lib/candidateJobs";
+import { findSharedJob, lookupJobs } from "@/lib/candidateJobs";
+import { runWithProject } from "@/lib/swipeAdmin";
 import ViewTracker from "@/components/ViewTracker";
 
 export const dynamic = "force-dynamic";
 
 export async function generateMetadata({ params }: { params: Promise<{ token: string }> }): Promise<Metadata> {
   const { token } = await params;
-  const job = await getCandidateJobByToken(token).catch(() => null);
+  const job = (await findSharedJob(token).catch(() => null))?.job;
   return {
     title: job ? `${job.company ?? ""} ${job.title ?? "求人のご紹介"}`.trim() : "求人のご紹介",
     robots: { index: false, follow: false },
@@ -17,9 +18,13 @@ export async function generateMetadata({ params }: { params: Promise<{ token: st
 /** 候補者に送る求人ページ（ログイン不要。リンクを知っている人だけが見られる） */
 export default async function SharedJobPage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
-  const cj = await getCandidateJobByToken(token).catch(() => null);
-  if (!cj) notFound();
-  const job = cj.job_id ? (await lookupJobs([cj.job_id]).catch(() => new Map())).get(cj.job_id) : undefined;
+  const shared = await findSharedJob(token).catch(() => null);
+  if (!shared) notFound();
+  const cj = shared.job;
+  const jobId = cj.job_id;
+  const job = jobId
+    ? (await runWithProject(shared.project, () => lookupJobs([jobId])).catch(() => new Map())).get(jobId)
+    : undefined;
   const pdfUrl = cj.pdf_path ? `/j/${token}/pdf` : null;
 
   const sections: [string, string | null | undefined][] = job
