@@ -14,7 +14,9 @@ import {
 import { CALL_RESULTS, JOB_STAGES, STAFF_COLORS, STATUSES } from "@/lib/crmConstants";
 import { addCandidateJob, PDF_BUCKET } from "@/lib/candidateJobs";
 import { crmSelect, CrmNotReadyError, isMissingTable, type CrmCandidate } from "@/lib/crm";
-import { enc, storageSignUpload, writeRows } from "@/lib/swipeAdmin";
+import { cookies } from "next/headers";
+import { isProjectKey, PROJECT_COOKIE, PROJECT_PARAM } from "@/lib/projects";
+import { availableProjects, enc, storageSignUpload, syncStaffTo, writeRows } from "@/lib/swipeAdmin";
 
 const str = (f: FormData, k: string) => String(f.get(k) ?? "").trim();
 const back = (path: string, q: Record<string, string>) =>
@@ -51,6 +53,16 @@ export async function login(form: FormData) {
   }
   await startSession(staff.id);
   redirect(next);
+}
+
+/** ヘッダーのプルダウンでプロジェクトを切り替える */
+export async function switchProject(project: string) {
+  await requireStaff();
+  if (!isProjectKey(project) || !availableProjects().some((p) => p.key === project)) return;
+  (await cookies()).set(PROJECT_COOKIE, project, { path: "/", sameSite: "lax", maxAge: 60 * 60 * 24 * 365 });
+  // 切り替え先の DB にメンバーの行を写しておく（架電記録などの担当者として参照されるため）
+  await syncStaffTo(project).catch(() => {});
+  redirect(`/admin?${PROJECT_PARAM}=${project}`);
 }
 
 export async function logout() {

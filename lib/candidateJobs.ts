@@ -1,9 +1,12 @@
 import "server-only";
 import { randomBytes, randomUUID } from "node:crypto";
+import { cache } from "react";
 import { crmSelect } from "@/lib/crm";
 import {
+  availableProjects,
   enc,
   JOB_DETAIL_COLS,
+  runWithProject,
   selectIn,
   writeRows,
   type JobDetail,
@@ -41,6 +44,18 @@ export async function getCandidateJobByToken(token: string) {
   const rows = await crmSelect<CandidateJob>("crm_candidate_jobs", `select=${COLS}&share_token=eq.${enc(token)}`);
   return rows[0] ?? null;
 }
+
+/**
+ * 共有リンク（/j/<token>）用。候補者はプロジェクトを選んでいないので、
+ * 全プロジェクトからトークンを探し、見つかったプロジェクトと一緒に返す。
+ */
+export const findSharedJob = cache(async (token: string) => {
+  for (const { key } of availableProjects()) {
+    const job = await runWithProject(key, () => getCandidateJobByToken(token)).catch(() => null);
+    if (job) return { project: key, job };
+  }
+  return null;
+});
 
 export async function getCandidateJob(id: string) {
   const rows = await crmSelect<CandidateJob>("crm_candidate_jobs", `select=${COLS}&id=eq.${enc(id)}`);

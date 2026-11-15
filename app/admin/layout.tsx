@@ -3,6 +3,9 @@ import type { Metadata } from "next";
 import { getCurrentStaff } from "@/lib/auth";
 import { Avatar } from "@/components/admin/bits";
 import { logout } from "@/app/admin/actions";
+import ProjectSwitcher from "@/components/admin/ProjectSwitcher";
+import { availableProjects, currentProject } from "@/lib/swipeAdmin";
+import { Suspense } from "react";
 
 export const metadata: Metadata = {
   title: "SwipeJob 顧客管理",
@@ -11,6 +14,8 @@ export const metadata: Metadata = {
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const me = await getCurrentStaff().catch(() => null);
+  const projects = availableProjects();
+  const project = await currentProject();
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/95 backdrop-blur">
@@ -20,6 +25,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
           </Link>
           {me && (
             <>
+              <Suspense fallback={null}>
+                <ProjectSwitcher current={project} projects={projects} />
+              </Suspense>
               <nav className="flex gap-3 whitespace-nowrap text-sm text-slate-600 sm:gap-4">
                 <Link href="/admin" className="hover:text-slate-900">候補者</Link>
                 <Link href="/admin/analytics" className="hover:text-slate-900">分析</Link>

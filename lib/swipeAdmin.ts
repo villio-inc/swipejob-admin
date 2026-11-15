@@ -1,6 +1,16 @@
 // SwipeJob 管理ダッシュボード用の Supabase（PostgREST）読み取りヘルパー。
 // サーバー側でのみ使う（service_role キーをブラウザに出さない）。
 import "server-only";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { cookies, headers } from "next/headers";
+import {
+  isProjectKey,
+  PRIMARY_PROJECT,
+  PROJECT_COOKIE,
+  PROJECT_HEADER,
+  PROJECTS,
+  type ProjectKey,
+} from "@/lib/projects";
 
 export type SwipeAction = "like" | "pass" | string;
 
@@ -132,15 +142,83 @@ export function inScope(u: Pick<AdminUser, "createdAt"> | null | undefined) {
   return new Date(iso).getTime() >= new Date(scopeStartUtc().replace(" ", "T") + "Z").getTime();
 }
 
-function config() {
-  const url = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const projectScope = new AsyncLocalStorage<ProjectKey>();
+
+/** この中の DB・Storage アクセスを、指定したプロジェクトに向ける（Cookie より優先） */
+export function runWithProject<T>(project: ProjectKey, fn: () => Promise<T>): Promise<T> {
+  return projectScope.run(project, fn);
+}
+
+function isConfigured(project: ProjectKey) {
+  const def = PROJECTS.find((p) => p.key === project)!;
+  return !!(process.env[def.urlEnv] && process.env[def.keyEnv]);
+}
+
+/** 接続情報が環境変数に入っているプロジェクト（プルダウンに出すもの） */
+export function availableProjects() {
+  return PROJECTS.filter((p) => isConfigured(p.key)).map(({ key, label }) => ({ key, label }));
+}
+
+/**
+ * いま対象にしているプロジェクト。
+ * runWithProject の指定 → URL の ?p=（proxy.ts がヘッダーに入れる）→ Cookie → 先頭のプロジェクト、の順で決める。
+ */
+export async function currentProject(): Promise<ProjectKey> {
+  const scoped = projectScope.getStore();
+  if (scoped) return scoped;
+  try {
+    const fromUrl = (await headers()).get(PROJECT_HEADER);
+    if (isProjectKey(fromUrl) && isConfigured(fromUrl)) return fromUrl;
+    const fromCookie = (await cookies()).get(PROJECT_COOKIE)?.value;
+    if (isProjectKey(fromCookie) && isConfigured(fromCookie)) return fromCookie;
+  } catch {
+    // リクエストの外（ビルド時など）では既定のプロジェクトを使う
+  }
+  return PRIMARY_PROJECT;
+}
+
+// メンバーと招待は全プロジェクト共通。どのプロジェクトを選んでいても先頭のプロジェクトの DB を読み書きする
+const SHARED_TABLES = new Set(["crm_staff", "crm_invites"]);
+
+async function projectFor(table?: string): Promise<ProjectKey> {
+  return table && SHARED_TABLES.has(table) ? PRIMARY_PROJECT : currentProject();
+}
+
+function config(project: ProjectKey) {
+  const def = PROJECTS.find((p) => p.key === project)!;
+  const url = process.env[def.urlEnv]?.replace(/\/$/, "");
+  const key = process.env[def.keyEnv];
   if (!url || !key) {
-    throw new ConfigError(
-      "SUPABASE_URL と SUPABASE_SERVICE_ROLE_KEY を環境変数に設定してください。",
-    );
+    throw new ConfigError(`${def.urlEnv} と ${def.keyEnv} を環境変数に設定してください。`);
   }
   return { url, key };
+}
+
+/**
+ * メンバーの行を、先頭のプロジェクトから指定したプロジェクトの crm_staff へ写す。
+ * 架電記録などは担当者を crm_staff への外部キーで持つため、各プロジェクトの DB にも同じ id の行が要る。
+ */
+export async function syncStaffTo(project: ProjectKey) {
+  if (project === PRIMARY_PROJECT) return;
+  const staff = await runWithProject(PRIMARY_PROJECT, () =>
+    selectAll<Record<string, unknown>>("crm_staff", "select=*"),
+  );
+  if (staff.length === 0) return;
+  const { url, key } = config(project);
+  const res = await fetch(`${url}/rest/v1/crm_staff?on_conflict=id`, {
+    method: "POST",
+    headers: {
+      apikey: key,
+      ...(key.startsWith("eyJ") ? { Authorization: `Bearer ${key}` } : {}),
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify(staff),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(`メンバー情報の同期に失敗しました (${res.status}): ${await res.text()}`);
+  }
 }
 
 const PAGE = 1000;
@@ -153,8 +231,9 @@ export async function writeRows<T>(
   body?: unknown,
   opts: { upsert?: boolean; ignoreDuplicates?: boolean } = {},
 ): Promise<T[]> {
-  const { url, key } = config();
-  const res = await fetch(`${url}/rest/v1/${table}${query ? `?${query}` : ""}`, {
+  const project = await projectFor(table);
+  const { url, key } = config(project);
+  const send = () => fetch(`${url}/rest/v1/${table}${query ? `?${query}` : ""}`, {
     method,
     headers: {
       apikey: key,
@@ -170,6 +249,15 @@ export async function writeRows<T>(
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",
   });
+  let res = await send();
+  // 担当者の行がこのプロジェクトの DB にまだ無い（外部キー違反 23503）ときは、メンバーを写してからやり直す
+  if (res.status === 409 && project !== PRIMARY_PROJECT) {
+    const detail = await res.clone().text();
+    if (detail.includes("23503") && detail.includes("crm_staff")) {
+      await syncStaffTo(project);
+      res = await send();
+    }
+  }
   if (!res.ok) {
     throw new Error(`Supabase ${table} への書き込みに失敗しました (${res.status}): ${await res.text()}`);
   }
@@ -180,7 +268,7 @@ export async function writeRows<T>(
 /** PostgREST から全件取得（1000件ずつ Range でページング） */
 /** Storage：ブラウザから直接アップロードするための署名付き URL */
 export async function storageSignUpload(bucket: string, path: string) {
-  const { url, key } = config();
+  const { url, key } = config(await currentProject());
   const res = await fetch(`${url}/storage/v1/object/upload/sign/${bucket}/${path}`, {
     method: "POST",
     headers: { apikey: key, ...(key.startsWith("eyJ") ? { Authorization: `Bearer ${key}` } : {}) },
@@ -193,7 +281,7 @@ export async function storageSignUpload(bucket: string, path: string) {
 
 /** Storage：一時的にファイルを見られる署名付き URL */
 export async function storageSignDownload(bucket: string, path: string, expiresIn = 3600) {
-  const { url, key } = config();
+  const { url, key } = config(await currentProject());
   const res = await fetch(`${url}/storage/v1/object/sign/${bucket}/${path}`, {
     method: "POST",
     headers: {
@@ -210,7 +298,7 @@ export async function storageSignDownload(bucket: string, path: string, expiresI
 }
 
 export async function selectAll<T>(table: string, query: string): Promise<T[]> {
-  const { url, key } = config();
+  const { url, key } = config(await projectFor(table));
   const out: T[] = [];
   for (let from = 0; ; from += PAGE) {
     const res = await fetch(`${url}/rest/v1/${table}?${query}`, {
