@@ -12,11 +12,11 @@ import {
   type Staff,
 } from "@/lib/auth";
 import { CALL_RESULTS, JOB_STAGES, STAFF_COLORS, STATUSES } from "@/lib/crmConstants";
-import { addCandidateJob, PDF_BUCKET } from "@/lib/candidateJobs";
+import { addCandidateJob, lookupJobs, PDF_BUCKET } from "@/lib/candidateJobs";
 import { crmSelect, CrmNotReadyError, isMissingTable, type CrmCandidate } from "@/lib/crm";
 import { cookies } from "next/headers";
 import { isProjectKey, PROJECT_COOKIE, PROJECT_PARAM } from "@/lib/projects";
-import { availableProjects, enc, storageSignUpload, syncStaffTo, writeRows } from "@/lib/swipeAdmin";
+import { availableProjects, enc, storageDownload, storageSignUpload, syncStaffTo, writeRows } from "@/lib/swipeAdmin";
 
 const str = (f: FormData, k: string) => String(f.get(k) ?? "").trim();
 const back = (path: string, q: Record<string, string>) =>
@@ -395,4 +395,63 @@ export async function saveInsightAsMemo(userId: string, text: string) {
     occurred_at: new Date().toISOString(),
   });
   return { ok: true };
+}
+
+/**
+ * まとめてアップロードした PDF を、1 ファイル 1 件の提案求人として登録する。
+ * PDF の中に求人 ID（hl-ap-…）があれば求人データから会社名・タイトルを入れ、なければ PDF の文字やファイル名から入れる。
+ */
+export async function addJobsFromPdfs(
+  userId: string,
+  files: { path: string; fileName: string }[],
+): Promise<{ fileName: string; ok: boolean; label?: string; error?: string }[]> {
+  const me = await requireStaff();
+  const prefix = userId.replace(/[^A-Za-z0-9_-]/g, "_") + "/";
+  const { readPdfJobInfo } = await import("@/lib/pdfJob");
+  const results = [];
+  for (const f of files.slice(0, 30)) {
+    if (!f.path.startsWith(prefix)) {
+      results.push({ fileName: f.fileName, ok: false, error: "不正なファイルです" });
+      continue;
+    }
+    try {
+      const info = await readPdfJobInfo(await storageDownload(PDF_BUCKET, f.path)).catch(() => ({
+        jobId: null,
+        company: null,
+        title: null,
+      }));
+      // 求人 ID がこのプロジェクトの求人データにあるときだけ結びつける
+      const known = info.jobId ? (await lookupJobs([info.jobId])).get(info.jobId) : undefined;
+      const fallbackTitle = f.fileName.replace(/\.pdf$/i, "");
+      const company = known?.company ?? info.company;
+      const title = known?.title ?? info.title ?? fallbackTitle;
+      await addCandidateJob({
+        userId,
+        source: "proposal",
+        jobId: known ? info.jobId : null,
+        company,
+        title,
+        pdfPath: f.path,
+        note: !known && info.jobId ? `求人ID: ${info.jobId}` : null,
+        staffId: me.id,
+      });
+      results.push({ fileName: f.fileName, ok: true, label: `${company ?? "（会社名不明）"} / ${title}` });
+    } catch (e) {
+      results.push({ fileName: f.fileName, ok: false, error: e instanceof Error ? e.message.slice(0, 200) : "登録に失敗しました" });
+    }
+  }
+  return results;
+}
+
+/** 提案求人の会社名・タイトルを直す */
+export async function updateCandidateJobInfo(form: FormData) {
+  await requireStaff();
+  const id = str(form, "id");
+  const userId = str(form, "userId");
+  await writeRows("PATCH", "crm_candidate_jobs", `id=eq.${enc(id)}`, {
+    company: str(form, "company") || null,
+    title: str(form, "title") || null,
+    updated_at: new Date().toISOString(),
+  });
+  redirect(back(`/admin/users/${encodeURIComponent(userId)}`, { tab: "jobs" }));
 }
