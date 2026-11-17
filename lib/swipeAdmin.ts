@@ -279,6 +279,17 @@ export async function storageSignUpload(bucket: string, path: string) {
   return `${url}/storage/v1${signed}`;
 }
 
+/** Storage：ファイルの中身を取得（サーバー側で読むとき用） */
+export async function storageDownload(bucket: string, path: string): Promise<ArrayBuffer> {
+  const { url, key } = config(await currentProject());
+  const res = await fetch(`${url}/storage/v1/object/${bucket}/${path}`, {
+    headers: { apikey: key, ...(key.startsWith("eyJ") ? { Authorization: `Bearer ${key}` } : {}) },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`ファイルの取得に失敗しました (${res.status})`);
+  return res.arrayBuffer();
+}
+
 /** Storage：一時的にファイルを見られる署名付き URL */
 export async function storageSignDownload(bucket: string, path: string, expiresIn = 3600) {
   const { url, key } = config(await currentProject());

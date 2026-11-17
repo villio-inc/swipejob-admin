@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { deleteCandidateJob } from "@/app/admin/actions";
+import { deleteCandidateJob, updateCandidateJobInfo } from "@/app/admin/actions";
+import PdfDropZone from "@/components/admin/PdfDropZone";
 import type { CandidateJob, ViewStats } from "@/lib/candidateJobs";
 import { formatJst } from "@/lib/swipeAdmin";
 import { JOB_SOURCES } from "@/lib/crmConstants";
@@ -7,7 +8,7 @@ import AddJobForm from "@/components/admin/AddJobForm";
 import CopyButton from "@/components/admin/CopyButton";
 import JobStageSelect from "@/components/admin/JobStageSelect";
 import MessageComposer from "@/components/admin/MessageComposer";
-import { Notice, btnCls, btnSubCls } from "@/components/admin/bits";
+import { Notice, btnCls, btnSubCls, inputCls } from "@/components/admin/bits";
 import Modal from "@/components/admin/Modal";
 
 export default function CandidateJobsPanel({
@@ -60,6 +61,7 @@ export default function CandidateJobsPanel({
         </div>
       </div>
       <div className="space-y-4 p-4">
+        <PdfDropZone userId={userId} />
         {saved === "job" && <Notice kind="ok">✓ 求人をリストに追加しました</Notice>}
         {error && <Notice kind="error">{error}</Notice>}
 
@@ -82,6 +84,7 @@ export default function CandidateJobsPanel({
                       <input type="hidden" name="userId" value={userId} />
                       <button className="text-xs text-slate-400">外す</button>
                     </form>
+                    <EditInfo j={j} userId={userId} />
                   </div>
                   <div>
                     <div className="text-xs text-slate-500">{l.company}</div>
@@ -144,6 +147,7 @@ export default function CandidateJobsPanel({
                           <input type="hidden" name="userId" value={userId} />
                           <button className="text-xs text-slate-400 hover:text-rose-600">外す</button>
                         </form>
+                        <EditInfo j={j} userId={userId} />
                       </td>
                     </tr>
                   );
@@ -171,5 +175,25 @@ function ViewCell({ v }: { v: ViewStats | undefined }) {
         {v.maxScroll}% まで・計 {min ? `${min}分` : ""}{sec}秒{v.pdfOpened ? "・PDF 開封" : ""}
       </div>
     </div>
+  );
+}
+
+function EditInfo({ j, userId }: { j: CandidateJob; userId: string }) {
+  return (
+    <Modal title="会社名・タイトルを直す" buttonLabel="編集" buttonClassName="text-xs text-slate-400 hover:text-slate-700">
+      <form action={updateCandidateJobInfo} className="space-y-3">
+        <input type="hidden" name="id" value={j.id} />
+        <input type="hidden" name="userId" value={userId} />
+        <label className="block">
+          <span className="mb-1 block text-xs font-semibold text-slate-600">会社名</span>
+          <input name="company" defaultValue={j.company ?? ""} className={inputCls} />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-xs font-semibold text-slate-600">求人タイトル</span>
+          <input name="title" defaultValue={j.title ?? ""} className={inputCls} />
+        </label>
+        <button className={btnCls}>保存</button>
+      </form>
+    </Modal>
   );
 }
