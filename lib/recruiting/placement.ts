@@ -11,6 +11,12 @@ import { SLOTS, SLOT_IN_SHEET, Slot, zeroSlots } from "./slots";
  * 不足のコマ数（合計）と必要な採用人数（不足数）は別物で、
  * 「1名が約3日シフトに入れる」前提で人数に直されている。
  * こちらで計算し直すと元の表と食い違うので、**シートの数字をそのまま読む**。
+ *
+ * **黄色のセルが「まだ埋まっていないコマ」**（2026-11-19 指示）。
+ * シートの式では合計が3コマ以下の校舎を「充足」として不足数0にしているので、
+ * 数字が入っていても不足として数えないコマがある。
+ * 数字だけを見て全部を不足として扱うと、充足している校舎まで赤く出て
+ * 「全校舎が足りない」ように見えてしまうので、**印の付いたコマだけを数える**。
  */
 
 /** 配置表が持っている分野。採用管理表の「分野」より粗い（Officeなどの枠は無い）。 */
@@ -24,6 +30,28 @@ export const FIELD_LABEL: Record<PlacementField, string> = {
   CAD: "CAD",
 };
 
+/**
+ * 「まだ埋まっていない」の印。黄色のべた塗り。
+ *
+ * 色の指定は FFFF00 のこともあれば FFFFFF00（先頭2桁は不透明度）のこともあり、
+ * 少し違う黄色が使われることもあるので、**黄色の範囲**で見る。
+ * 行の網掛け（灰）や校舎名のオレンジ（FFC000）は入らないようにしている。
+ */
+export function isShortageMark(rgb: string | undefined): boolean {
+  const hex = String(rgb ?? "").toUpperCase().replace(/[^0-9A-F]/g, "");
+  if (hex.length < 6) return false;
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(hex.length - 6 + i, hex.length - 6 + i + 2), 16));
+  // 赤と緑が高く、青がはっきり低いものを黄色とみなす。
+  // 白(FFFFFF)は青が下がらないので入らず、校舎名のオレンジ(FFC000)は緑が足りないので入らない。
+  return r >= 0xe0 && g >= 0xd0 && b <= g - 0x20;
+}
+
+function markOf(cell: XLSX.CellObject | undefined): boolean {
+  const style = (cell as { s?: { patternType?: string; fgColor?: { rgb?: string } } } | undefined)?.s;
+  if (!style || style.patternType !== "solid") return false;
+  return isShortageMark(style.fgColor?.rgb);
+}
+
 export interface PlacementRow {
   /** 「仙台駅前」。応募データと突き合わせるときは normalizeShopKey を通す。 */
   shopShortName: string;
@@ -32,8 +60,10 @@ export interface PlacementRow {
   shopStatus: string;
   /** 現状と方針（シートに書かれているコメント） */
   note: string;
-  /** 分野 × 時間帯 の不足コマ数 */
+  /** 分野 × 時間帯 の不足コマ数（シートの数字そのまま） */
   shortage: Record<PlacementField, Record<Slot, number>>;
+  /** そのコマに「まだ埋まっていない」の印（黄色）が付いているか */
+  marked: Record<PlacementField, Record<Slot, boolean>>;
   /** 不足コマの合計（シートの「合計」列） */
   slots: number;
   /** 一般充足判定。「充足」なら埋まっている。 */
@@ -52,6 +82,11 @@ export interface PlacementSheet {
   importedAt: string;
   /** 読み飛ばした行数（校舎名が空など） */
   skipped: number;
+  /**
+   * 黄色の印が付いたコマの数。
+   * 0 なら印を使っていないファイルなので、数字の入ったコマを全部不足として数える。
+   */
+  markedCells: number;
 }
 
 function text(v: unknown): string {
@@ -83,6 +118,14 @@ const emptyShortage = (): Record<PlacementField, Record<Slot, number>> => ({
   CAD: zeroSlots(),
 });
 
+const noSlots = (): Record<Slot, boolean> => ({ 平日昼: false, 平日夜: false, 土日: false });
+
+const emptyMarks = (): Record<PlacementField, Record<Slot, boolean>> => ({
+  IT: noSlots(),
+  WEB: noSlots(),
+  CAD: noSlots(),
+});
+
 /**
  * シートを選ぶ。既定は「一般充足」。
  *
@@ -111,13 +154,29 @@ function pickSheet(wb: XLSX.WorkBook): { name: string; header: number; cols: str
 }
 
 export function parsePlacementSheet(fileName: string, buf: ArrayBuffer): PlacementSheet {
-  const wb = XLSX.read(new Uint8Array(buf), { type: "array", raw: false });
+  // cellStyles を付けないとセルの塗り（＝まだ埋まっていない印）が読めない
+  const wb = XLSX.read(new Uint8Array(buf), { type: "array", raw: false, cellStyles: true });
   const picked = pickSheet(wb);
   if (!picked) {
-    return { rows: [], sheetName: "", sourceFileName: fileName, importedAt: new Date().toISOString(), skipped: 0 };
+    return {
+      rows: [],
+      sheetName: "",
+      sourceFileName: fileName,
+      importedAt: new Date().toISOString(),
+      skipped: 0,
+      markedCells: 0,
+    };
   }
 
-  const grid = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[picked.name], { header: 1, defval: "", raw: false });
+  const ws = wb.Sheets[picked.name];
+  const grid = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "", raw: false });
+  /**
+   * 表のマス目の位置から、シート上のセルを引く。
+   * sheet_to_json は使っている範囲の左上から並べるので、その分をずらす。
+   */
+  const origin = XLSX.utils.decode_range(ws["!ref"] ?? "A1").s;
+  const cellAt = (gridRow: number, gridCol: number) =>
+    ws[XLSX.utils.encode_cell({ r: origin.r + gridRow, c: origin.c + gridCol })] as XLSX.CellObject | undefined;
   const at = (name: string) =>
     picked.cols.findIndex((c) => c.replace(/[\s　]/g, "") === name);
 
@@ -137,8 +196,10 @@ export function parsePlacementSheet(fileName: string, buf: ArrayBuffer): Placeme
 
   const rows: PlacementRow[] = [];
   let skipped = 0;
+  let markedCells = 0;
 
-  for (const raw of grid.slice(picked.header + 1)) {
+  for (let gridRow = picked.header + 1; gridRow < grid.length; gridRow++) {
+    const raw = grid[gridRow] ?? [];
     const shop = text(raw[col.shop]);
     if (!shop || shop === "校舎名") {
       skipped++;
@@ -146,7 +207,13 @@ export function parsePlacementSheet(fileName: string, buf: ArrayBuffer): Placeme
     }
 
     const shortage = emptyShortage();
-    for (const { i, hit } of slotCols) shortage[hit.field][hit.slot] = num(raw[i]);
+    const marked = emptyMarks();
+    for (const { i, hit } of slotCols) {
+      shortage[hit.field][hit.slot] = num(raw[i]);
+      const mark = markOf(cellAt(gridRow, i));
+      marked[hit.field][hit.slot] = mark;
+      if (mark) markedCells++;
+    }
     const sum = PLACEMENT_FIELDS.reduce(
       (a, f) => a + SLOTS.reduce((b, s) => b + shortage[f][s], 0),
       0
@@ -154,6 +221,7 @@ export function parsePlacementSheet(fileName: string, buf: ArrayBuffer): Placeme
 
     rows.push({
       shopShortName: shop,
+      marked,
       manager: col.manager >= 0 ? text(raw[col.manager]) : "",
       shopStatus: col.shopStatus >= 0 ? text(raw[col.shopStatus]) : "",
       note: col.note >= 0 ? text(raw[col.note]) : "",
@@ -172,6 +240,7 @@ export function parsePlacementSheet(fileName: string, buf: ArrayBuffer): Placeme
     sourceFileName: fileName,
     importedAt: new Date().toISOString(),
     skipped,
+    markedCells,
   };
 }
 

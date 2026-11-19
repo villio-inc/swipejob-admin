@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as XLSX from "xlsx";
-import { parsePlacementSheet } from "@/lib/recruiting/placement";
+import { PlacementRow, PlacementSheet, isShortageMark, parsePlacementSheet } from "@/lib/recruiting/placement";
 import { parseHrSheet } from "@/lib/recruiting/hrsheet";
 import { hireMatrix, placementFieldOf, staffing } from "@/lib/recruiting/staffing";
 
@@ -206,4 +206,112 @@ test("コース × 時間帯の採用数は、配置表が無くても出せる"
   assert.equal(m.withoutSlots, 1, "時間帯の記入が無い人はマスに入れない");
   assert.deepEqual(m.bySlot, { 平日昼: 2, 平日夜: 1, 土日: 1 });
   assert.deepEqual(m.categories, ["IT", "C", "Office"], "採用が1名以上あるコースだけ行にする");
+});
+
+/**
+ * 黄色の印（まだ埋まっていないコマ）。
+ *
+ * 配置表には「合計が3コマ以下なら充足」という式が入っていて、数字が残っていても
+ * 不足として扱わないコマがある。全部を不足として数えると、充足している校舎まで
+ * 赤く出て「全校舎が足りない」ように見えてしまう。
+ */
+
+function placementOfMarks(
+  rows: {
+    shop: string;
+    it: [number, number, number];
+    marks: [boolean, boolean, boolean];
+    need?: number;
+    judgement?: string;
+  }[]
+): PlacementSheet {
+  let markedCells = 0;
+  const placementRows: PlacementRow[] = rows.map((r) => {
+    r.marks.forEach((m) => m && markedCells++);
+    return {
+      shopShortName: r.shop,
+      manager: "",
+      shopStatus: "",
+      note: "",
+      shortage: {
+        IT: { 平日昼: r.it[0], 平日夜: r.it[1], 土日: r.it[2] },
+        WEB: { 平日昼: 0, 平日夜: 0, 土日: 0 },
+        CAD: { 平日昼: 0, 平日夜: 0, 土日: 0 },
+      },
+      marked: {
+        IT: { 平日昼: r.marks[0], 平日夜: r.marks[1], 土日: r.marks[2] },
+        WEB: { 平日昼: false, 平日夜: false, 土日: false },
+        CAD: { 平日昼: false, 平日夜: false, 土日: false },
+      },
+      slots: r.it.reduce((a, b) => a + b, 0),
+      judgement: r.judgement ?? "",
+      needHires: r.need ?? 0,
+      stop: "",
+    };
+  });
+  return {
+    rows: placementRows,
+    sheetName: "一般充足",
+    sourceFileName: "配置表.xlsx",
+    importedAt: new Date().toISOString(),
+    skipped: 0,
+    markedCells,
+  };
+}
+
+test("黄色の印が付いたコマだけを不足として数える", () => {
+  const placement = placementOfMarks([
+    { shop: "仙台駅前", it: [1, 1, 1], marks: [true, true, true], need: 3 },
+    // 充足と判定されている校舎。数字は残っているが印が無いので数えない。
+    { shop: "高崎", it: [1, 0, 1], marks: [false, false, false], judgement: "充足" },
+  ]);
+  const s = staffing(placement, null, {});
+  assert.equal(s.usesMarks, true);
+  assert.equal(s.total.total.shortage, 3);
+  // シートに入っていた数字は別に持っておく（取りこぼしに気付けるように）
+  assert.equal(s.total.total.sheetShortage, 5);
+  const takasaki = s.rows.find((r) => r.shopShortName.startsWith("高崎"))!;
+  assert.equal(takasaki.total.shortage, 0);
+  assert.equal(takasaki.total.sheetShortage, 2);
+});
+
+test("印が1つも無いファイルは、これまでどおり数字の入ったコマを全部数える", () => {
+  const placement = placementOfMarks([
+    { shop: "仙台駅前", it: [1, 1, 1], marks: [false, false, false], need: 3 },
+  ]);
+  const s = staffing(placement, null, {});
+  assert.equal(s.usesMarks, false);
+  assert.equal(s.total.total.shortage, 3);
+});
+
+test("印と不足数が食い違う校舎を拾う", () => {
+  const placement = placementOfMarks([
+    { shop: "仙台駅前", it: [1, 1, 1], marks: [true, true, true], need: 3 },
+    // 印はあるが不足数0（消し忘れ）
+    { shop: "大宮", it: [1, 0, 0], marks: [true, false, false], need: 0, judgement: "充足" },
+    // 不足数はあるが印が無い（付け忘れ）
+    { shop: "オンライン", it: [2, 2, 3], marks: [false, false, false], need: 7 },
+  ]);
+  const s = staffing(placement, null, {});
+  assert.deepEqual(
+    s.markMismatches.map((m) => `${m.shopShortName}:印${m.markedCells}/不足数${m.needHires}`).sort(),
+    ["オンライン:印0/不足数7", "大宮校:印1/不足数0"]
+  );
+});
+
+test("黄色の判定は、行の網掛けや校舎名のオレンジを拾わない", () => {
+  assert.equal(isShortageMark("FFFF00"), true);
+  assert.equal(isShortageMark("FFFFFF00"), true);
+  assert.equal(isShortageMark("FFFF99"), true);
+  // 校舎名に使われているオレンジ
+  assert.equal(isShortageMark("FFC000"), false);
+  // 行の網掛け（灰）
+  assert.equal(isShortageMark("7F7F7F"), false);
+  assert.equal(isShortageMark(undefined), false);
+  assert.equal(isShortageMark(""), false);
+});
+
+test("白や薄い色は印として拾わない", () => {
+  assert.equal(isShortageMark("FFFFFF"), false);
+  assert.equal(isShortageMark("FFFFCC"), true);
 });

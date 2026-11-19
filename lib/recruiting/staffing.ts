@@ -10,6 +10,13 @@ import { SHOP_MASTER, normalizeShopKey } from "./shops";
  * 配置表はコマ単位で足りない数を持ち、採用管理表は1人ずつ入れる時間帯（W〜Y列）を持つので、
  * その2つを同じマスに並べる。
  *
+ * **数えるのは黄色の印が付いたコマだけ**（2026-11-19 指示）。
+ * 配置表には、合計が3コマ以下なら「充足」として不足数を0にする式が入っていて、
+ * 数字が残っていても不足として扱わないコマがある。
+ * 全部のコマを不足として数えると、充足している校舎まで赤く出て
+ * 「全校舎が足りない」ように見えるので、印の付いたコマだけを数える。
+ * 印がまったく無いファイル（印を使う前のもの）では、これまでどおり全部のコマを数える。
+ *
  * **引き算の前提**：配置表の不足は、いま入っている講師を引いたあとの数。
  * 採用した人がまだ配置表に反映されていない場合に、残りがいくつになるかを出している。
  * すでに反映済みなら二重に引くことになるので、画面にその旨を書いておく。
@@ -29,8 +36,10 @@ export function placementFieldOf(course: string): PlacementField | null {
 }
 
 export interface StaffingCell {
-  /** 配置表の不足コマ */
+  /** 不足として数えたコマ（印を使っているファイルでは、印の付いたコマだけ） */
   shortage: number;
+  /** シートに入っていた数字。印が付いていないぶんも含む。 */
+  sheetShortage: number;
   /** その枠に入れる合格者の人数 */
   hired: number;
   /** 残りコマ。マイナスにはしない。 */
@@ -50,6 +59,8 @@ export interface StaffingRow {
   needHires: number;
   /** 全分野募集停止 */
   stop: string;
+  /** この校舎で印の付いたコマの数 */
+  markedCells: number;
   cells: Record<PlacementField, Record<Slot, StaffingCell>>;
   byField: Record<PlacementField, StaffingCell>;
   bySlot: Record<Slot, StaffingCell>;
@@ -71,11 +82,19 @@ export interface Staffing {
   hasPlacement: boolean;
   /** 採用管理表を取り込んでいるか */
   hasHires: boolean;
+  /** 黄色の印で不足コマを決めているか（印の無いファイルでは false） */
+  usesMarks: boolean;
+  /**
+   * 印と「不足数」の食い違い。
+   * 印は手で付けるものなので、消し忘れ・付け忘れがあると画面の中で矛盾する。
+   * 黙って片方に寄せると気付けなくなるので、拾って画面に出す。
+   */
+  markMismatches: { shopShortName: string; markedCells: number; needHires: number }[];
 }
 
 const MASTER_BY_KEY = new Map(SHOP_MASTER.map((s) => [normalizeShopKey(s.short), s.short]));
 
-const emptyCell = (): StaffingCell => ({ shortage: 0, hired: 0, remaining: 0 });
+const emptyCell = (): StaffingCell => ({ shortage: 0, sheetShortage: 0, hired: 0, remaining: 0 });
 
 const emptyCells = (): Record<PlacementField, Record<Slot, StaffingCell>> =>
   Object.fromEntries(
@@ -98,6 +117,7 @@ function emptyRow(key: string, shopShortName: string): StaffingRow {
     judgement: "",
     needHires: 0,
     stop: "",
+    markedCells: 0,
     cells: emptyCells(),
     byField: emptyByField(),
     bySlot: emptyBySlot(),
@@ -126,6 +146,7 @@ function roll(row: StaffingRow) {
       c.remaining = Math.max(0, c.shortage - c.hired);
       for (const into of [row.byField[f], row.bySlot[s], row.total]) {
         into.shortage += c.shortage;
+        into.sheetShortage += c.sheetShortage;
         into.hired += c.hired;
         into.remaining += c.remaining;
       }
@@ -150,11 +171,14 @@ export function staffing(
     return r;
   };
 
+  // 印の付いたコマが1つでもあれば、そのファイルは印で不足を示している
+  const usesMarks = (placement?.markedCells ?? 0) > 0;
+
   for (const p of placement?.rows ?? []) {
     const key = normalizeShopKey(p.shopShortName);
     if (include && !include(key)) continue;
     const r = row(key, p.shopShortName);
-    fillFromPlacement(r, p);
+    fillFromPlacement(r, p, usesMarks);
   }
 
   let unmatchedHires = 0;
@@ -189,10 +213,12 @@ export function staffing(
     for (const f of PLACEMENT_FIELDS) {
       for (const s of SLOTS) {
         total.cells[f][s].shortage += r.cells[f][s].shortage;
+        total.cells[f][s].sheetShortage += r.cells[f][s].sheetShortage;
         total.cells[f][s].hired += r.cells[f][s].hired;
       }
     }
     total.needHires += r.needHires;
+    total.markedCells += r.markedCells;
     total.hiredPeople += r.hiredPeople;
     total.hiredOutsideFields += r.hiredOutsideFields;
     total.hiredWithoutSlots += r.hiredWithoutSlots;
@@ -205,10 +231,16 @@ export function staffing(
     unmatchedHires,
     hasPlacement: (placement?.rows.length ?? 0) > 0,
     hasHires: (hrSheet?.rows.length ?? 0) > 0,
+    usesMarks,
+    markMismatches: usesMarks
+      ? list
+          .filter((r) => (r.markedCells > 0) !== (r.needHires > 0))
+          .map((r) => ({ shopShortName: r.shopShortName, markedCells: r.markedCells, needHires: r.needHires }))
+      : [],
   };
 }
 
-function fillFromPlacement(r: StaffingRow, p: PlacementRow) {
+function fillFromPlacement(r: StaffingRow, p: PlacementRow, usesMarks: boolean) {
   r.manager = p.manager;
   r.shopStatus = p.shopStatus;
   r.note = p.note;
@@ -216,7 +248,13 @@ function fillFromPlacement(r: StaffingRow, p: PlacementRow) {
   r.needHires = p.needHires;
   r.stop = p.stop;
   for (const f of PLACEMENT_FIELDS) {
-    for (const s of SLOTS) r.cells[f][s].shortage += p.shortage[f][s];
+    for (const s of SLOTS) {
+      const marked = p.marked?.[f]?.[s] ?? false;
+      if (marked) r.markedCells++;
+      r.cells[f][s].sheetShortage += p.shortage[f][s];
+      // 印を使っているファイルでは、印の付いていないコマは不足として数えない
+      r.cells[f][s].shortage += usesMarks && !marked ? 0 : p.shortage[f][s];
+    }
   }
 }
 

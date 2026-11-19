@@ -1228,7 +1228,7 @@ export default function DashboardPage() {
             {staff.hasPlacement ? (
               <Card
                 title="校舎 × コース × 時間帯の充足（委託講師配置表）"
-                subtitle="各マスは「その枠に入れる合格者 / 不足コマ」。コースが合っていても入れる時間帯が違えばコマは埋まらないので、時間帯まで分けています。残りコマが多い校舎から並びます。"
+                subtitle="各マスは「その枠に入れる合格者 / 不足コマ」。不足コマは一般充足シートで黄色の印が付いたコマだけを数えています。コースが合っていても入れる時間帯が違えばコマは埋まらないので、時間帯まで分けています。残りコマが多い校舎から並びます。"
               >
                 <div className="space-y-4">
                   <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
@@ -1244,6 +1244,11 @@ export default function DashboardPage() {
                     </span>
                     <span style={{ color: "var(--text-secondary)" }}>
                       不足コマ {staff.total.total.shortage}
+                      {staff.usesMarks && staff.total.total.sheetShortage !== staff.total.total.shortage && (
+                        <span style={{ color: "var(--text-muted)" }}>
+                          （印の付いたコマだけ。シートの数字は全部で{staff.total.total.sheetShortage}）
+                        </span>
+                      )}
                       {" → 残り "}
                       <strong style={{ color: staff.total.total.remaining === 0 ? "var(--status-good)" : "var(--text-primary)" }}>
                         {staff.total.total.remaining}
@@ -1258,6 +1263,29 @@ export default function DashboardPage() {
                   <StaffingTable data={staff} />
 
                   <ul className="space-y-1 text-xs leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                    {staff.usesMarks && (
+                      <li>
+                        <strong style={{ color: "var(--text-primary)" }}>数えているコマ</strong> …
+                        一般充足シートで<strong>黄色の印が付いたコマ</strong>だけです（
+                        {staff.total.markedCells}コマに印）。
+                        シートには合計が3コマ以下の校舎を「充足」にする式が入っていて、
+                        数字が残っていても不足として扱わないコマがあるため、印のないコマは数えていません。
+                      </li>
+                    )}
+                    {staff.markMismatches.length > 0 && (
+                      <li style={{ color: "var(--status-warning)" }}>
+                        印と「不足数」が食い違っている校舎があります：
+                        {staff.markMismatches
+                          .map((m) =>
+                            m.markedCells > 0
+                              ? `${m.shopShortName}（印${m.markedCells}コマ・不足数0）`
+                              : `${m.shopShortName}（印なし・不足数${m.needHires}名）`
+                          )
+                          .join("・")}
+                        。印は手で付けるものなので、消し忘れ・付け忘れだとこの表と不足数がずれます。
+                        どちらが正しいか教えていただければ、そちらに寄せます。
+                      </li>
+                    )}
                     <li>
                       <strong style={{ color: "var(--text-primary)" }}>不足コマ</strong> … 委託講師配置表「
                       {placement?.sheetName ?? "一般充足"}」の 校舎 × 分野 × 時間帯。
