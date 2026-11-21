@@ -26,6 +26,11 @@ export type StatusKey = (typeof STATUSES)[number]["key"];
 /** 途中で終わったステータス（分析では件数を別に数える） */
 export const ENDED = ["declined", "rejected", "other_offer", "quit", "unreachable", "invalid", "closed"];
 
+/** 選考が終わった人（途中で終わった人＋内定承諾）。一覧では「選考終了」に分ける */
+export function isClosedStatus(key: string | null | undefined) {
+  return key === "accepted" || ENDED.includes(key ?? "");
+}
+
 /** 選択肢に出すステータス（旧ステータスは、今それが付いている人にだけ出す） */
 export function selectableStatuses(current?: string | null) {
   return STATUSES.filter((s) => !("legacy" in s) || s.key === current);

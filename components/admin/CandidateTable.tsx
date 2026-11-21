@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { quickUpdateCandidate } from "@/app/admin/actions";
 import type { CandidateRow } from "@/lib/swipeAdmin";
-import { EXCLUDED, selectableStatuses, STATUSES, statusInfo } from "@/lib/crmConstants";
+import { EXCLUDED, isClosedStatus, selectableStatuses, STATUSES, statusInfo } from "@/lib/crmConstants";
 import { Avatar } from "@/components/admin/bits";
 
 type Row = CandidateRow & {
@@ -15,6 +15,7 @@ type Row = CandidateRow & {
   lastContactAt: string | null;
 };
 type StaffLite = { id: string; name: string; color: string };
+type View = "active" | "ended" | "all";
 type SortKey = "createdAt" | "lastSwipeAt" | "lastContactAt" | "likes";
 
 function jst(ts: string | null) {
@@ -36,6 +37,20 @@ const ms = (ts: string | null) => {
 export default function CandidateTable({ rows, staff, meId }: { rows: Row[]; staff: StaffLite[]; meId: string }) {
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("all");
+  // 進行中（既定）／選考終了／すべて。前回の選択をこのブラウザに覚えておく
+  const [view, setViewState] = useState<View>("active");
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem("candidateView");
+      if (v === "active" || v === "ended" || v === "all") setViewState(v);
+    } catch {}
+  }, []);
+  const setView = (v: View) => {
+    setViewState(v);
+    try {
+      localStorage.setItem("candidateView", v);
+    } catch {}
+  };
   const [assignee, setAssignee] = useState("all");
   const [sort, setSort] = useState<SortKey>("createdAt");
   const staffById = useMemo(() => new Map(staff.map((s) => [s.id, s])), [staff]);
@@ -80,8 +95,15 @@ export default function CandidateTable({ rows, staff, meId }: { rows: Row[]; sta
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     const list = withEdits.filter((r) => {
-      // 「すべて」ではテスト・除外の人を出さない（ステータスで選べば見られる）
-      if (status === "all" ? r.status === EXCLUDED : r.status !== status) return false;
+      if (status !== "all") {
+        // ステータスを選んだときは、そのステータスの人を全部出す
+        if (r.status !== status) return false;
+      } else {
+        // テスト・除外の人は出さない（ステータスで選べば見られる）
+        if (r.status === EXCLUDED) return false;
+        if (view === "active" && isClosedStatus(r.status)) return false;
+        if (view === "ended" && !isClosedStatus(r.status)) return false;
+      }
       if (assignee === "me" && r.assigneeId !== meId) return false;
       if (assignee === "none" && r.assigneeId) return false;
       if (!["all", "me", "none"].includes(assignee) && r.assigneeId !== assignee) return false;
@@ -91,7 +113,13 @@ export default function CandidateTable({ rows, staff, meId }: { rows: Row[]; sta
     const val = (r: Row) =>
       sort === "likes" ? r.likes : ms(sort === "createdAt" ? r.createdAt : sort === "lastSwipeAt" ? r.lastSwipeAt : r.lastContactAt);
     return [...list].sort((a, b) => val(b) - val(a));
-  }, [withEdits, q, status, assignee, sort, meId]);
+  }, [withEdits, q, status, view, assignee, sort, meId]);
+
+  const viewCounts = {
+    active: withEdits.filter((r) => r.status !== EXCLUDED && !isClosedStatus(r.status)).length,
+    ended: withEdits.filter((r) => isClosedStatus(r.status)).length,
+    all: withEdits.filter((r) => r.status !== EXCLUDED).length,
+  };
 
 
   const statusSelect = (r: Row) => (
@@ -132,6 +160,30 @@ export default function CandidateTable({ rows, staff, meId }: { rows: Row[]; sta
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center gap-1 border-b border-slate-200 px-3 pt-3">
+        {([
+          ["active", "進行中"],
+          ["ended", "選考終了"],
+          ["all", "すべて"],
+        ] as const).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => {
+              setView(key);
+              setStatus("all");
+            }}
+            className={`-mb-px rounded-t-lg border-b-2 px-4 py-2 text-sm font-semibold ${
+              view === key && status === "all"
+                ? "border-slate-900 text-slate-900"
+                : "border-transparent text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            {label} <span className="tabular-nums opacity-60">{viewCounts[key]}</span>
+          </button>
+        ))}
+        <span className="ml-auto hidden pb-2 text-xs text-slate-400 sm:inline">選考終了：内定承諾・辞退・見送り・他社で決定・転職活動中止・みなし辞退・無効応募</span>
+      </div>
       <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 p-3">
         <input
           value={q}
